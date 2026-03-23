@@ -1,0 +1,130 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+
+\title{Counterfactual Regret Minimization:\\Solving Imperfect-Information Games}
+\author{Abhi Wadhwa}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+These are my notes on CFR and its variants---the family of algorithms behind basically every major poker AI result in the last fifteen years. I walk through the core idea of regret matching, show how counterfactual values let you decompose regret across information sets, and explain why the average strategy converges to Nash equilibrium. I also cover CFR+ and Monte Carlo CFR, which are the versions people actually use in practice. The whole thing clicked for me once I realized it's really just ``do less of what you regret'' applied recursively down a game tree.
+\end{abstract}
+
+\section{Why This Is Hard}
+
+Poker is fundamentally different from chess or Go. In those games, both players see the full board---you can, in principle, just search the game tree and pick the best move. In poker, you don't know your opponent's cards. This means there's no single ``best move'' in the usual sense. If I always bet with a strong hand and check with a weak hand, my opponent will just fold whenever I bet and call whenever I check, and I'll get destroyed.
+
+\textbf{The key insight is that optimal play in poker requires mixed strategies}---you have to randomize. You need to bluff sometimes (bet with weak hands) so that your opponent can't just fold to every bet. But you can't bluff too much or they'll start calling everything. The right bluffing frequency is exactly what Nash equilibrium tells you.
+
+The gold standard solution concept here is the Nash equilibrium: a strategy profile where no player can improve their expected payoff by unilaterally deviating. In two-player zero-sum games (like poker), a Nash equilibrium strategy is \textbf{unexploitable}---it guarantees at least the game-theoretic value of the game no matter what your opponent does.
+
+\section{The Setup: Extensive-Form Games}
+
+We model poker as an extensive-form game, which is basically a game tree. The tree has:
+\begin{itemize}
+    \item \textbf{Chance nodes} where random events happen (cards are dealt),
+    \item \textbf{Decision nodes} where a player picks an action,
+    \item \textbf{Terminal nodes} with payoffs for each player.
+\end{itemize}
+
+The crucial concept is the \textbf{information set}. An information set $I$ groups together all the decision nodes where a player has the same observable information. In Kuhn Poker, for instance, if I hold a Jack and my opponent just checked, that's one information set---I don't know if they have a Queen or a King, so those two game states are in the same information set. A strategy assigns a probability distribution over actions at each information set.
+
+\section{Regret Matching}
+
+Before we get to CFR proper, let's talk about regret matching, which is the engine underneath. The idea is dead simple: \textbf{play actions in proportion to how much you regret not having played them}.
+
+Formally, at each information set $I$, we track a cumulative regret $R^T(I, a)$ for each action $a$. The strategy at the next iteration is:
+\begin{equation}
+    \sigma^{T+1}(I, a) = \frac{\max(R^T(I, a), 0)}{\sum_{b \in A(I)} \max(R^T(I, b), 0)}
+\end{equation}
+If all regrets are non-positive (i.e., you don't regret anything), you just play uniformly at random. Notice that this is a purely local rule---each information set updates independently, looking only at its own regrets.
+
+I spent a while trying to figure out why this should work at all. The intuition is that regret matching is a form of no-regret learning. If your cumulative regret grows sublinearly in $T$, then in hindsight, you're doing almost as well as the best fixed action. The neat thing is that when \textit{both} players use regret matching simultaneously, the strategies converge to a Nash equilibrium (in the average).
+
+\section{Counterfactual Values}
+
+Here's where the ``counterfactual'' part comes in. In a game tree, we need a way to assign values to information sets so we can compute regrets. The trick is to use \textbf{counterfactual values}, which weight terminal nodes by the opponent's probability of reaching them.
+
+The counterfactual value for player $i$ at information set $I$ under strategy profile $\sigma$ is:
+\begin{equation}
+    v_i(\sigma, I) = \sum_{z \in Z_I} \pi_{-i}^{\sigma}(z[I]) \cdot \pi^{\sigma}(z[I] \to z) \cdot u_i(z)
+\end{equation}
+where $Z_I$ is the set of terminal nodes reachable from $I$, $\pi_{-i}^{\sigma}(z[I])$ is the probability that the \textit{opponents} (and chance) play to reach the history $z[I]$ corresponding to $I$, $\pi^{\sigma}(z[I] \to z)$ is the probability of going from $z[I]$ to terminal node $z$ under $\sigma$, and $u_i(z)$ is player $i$'s utility at $z$.
+
+\textbf{Why counterfactual?} Because we factor out player $i$'s own contribution to the reach probability. This means the value at $I$ tells player $i$ how good the information set is \textit{assuming they try to reach it}. It's counterfactual in the sense that even if player $i$'s current strategy rarely visits $I$, the counterfactual value still reflects what would happen if they did.
+
+Similarly, the counterfactual value of taking action $a$ at $I$ is:
+\begin{equation}
+    v_i(\sigma, I, a) = \sum_{z \in Z_{I,a}} \pi_{-i}^{\sigma}(z[I]) \cdot \pi^{\sigma}(z[Ia] \to z) \cdot u_i(z)
+\end{equation}
+where $Z_{I,a}$ restricts to terminals reachable through action $a$.
+
+\section{The CFR Algorithm}
+
+Now we can put it together. The instantaneous counterfactual regret at iteration $t$ for action $a$ at information set $I$ is:
+\begin{equation}
+    r^t(I, a) = v_i(\sigma^t, I, a) - v_i(\sigma^t, I)
+\end{equation}
+This is just: ``how much better would I have done at $I$ if I'd always played $a$ instead of my current strategy?'' The cumulative regret is:
+\begin{equation}
+    R^T(I, a) = \sum_{t=1}^{T} r^t(I, a)
+\end{equation}
+
+At each iteration, vanilla CFR traverses the entire game tree, computes all the counterfactual values bottom-up, updates the regrets, and then uses regret matching (Equation 1) to get the next strategy. After playing with this for a while, you realize that the tree traversal is really just dynamic programming---the counterfactual values propagate up from the leaves exactly like minimax values do in perfect-information games, except we're averaging over information sets.
+
+\begin{theorem}[Zinkevich et al., 2007]
+In a two-player zero-sum game, if both players update their strategies using CFR, the \textbf{average strategy profile} $\bar{\sigma}^T$ converges to a Nash equilibrium. The exploitability (sum of best-response values) is bounded by $O(1/\sqrt{T})$.
+\end{theorem}
+
+It's easy to see that this must converge \textit{eventually}, because each information set independently has sublinear regret, and the total game regret is bounded by the sum of information-set regrets. The $O(1/\sqrt{T})$ rate comes from the standard regret bound for regret matching, which gives $O(\sqrt{T})$ cumulative regret and thus $O(1/\sqrt{T})$ average regret.
+
+\section{CFR+ and Monte Carlo CFR}
+
+Vanilla CFR works but has two practical issues. First, convergence can be slow because negative regrets drag things down. Second, each iteration requires a full game tree traversal, which is expensive for large games.
+
+\subsection{CFR+}
+
+CFR+ (Tammelin, 2014) makes two changes:
+\begin{enumerate}
+    \item \textbf{Regret clamping}: Instead of letting regrets go negative, clamp them to zero: $R^{T+1}(I,a) = \max(R^T(I,a) + r^{T+1}(I,a),\; 0)$. This means you immediately forget bad actions instead of slowly recovering.
+    \item \textbf{Linear averaging}: Weight iteration $t$'s strategy by $t$ instead of uniformly. Later iterations (which have better strategies) get more weight.
+\end{enumerate}
+
+The convergence rate is still $O(1/\sqrt{T})$ in theory, but in practice CFR+ is dramatically faster. It was the key algorithm behind the solution of Heads-Up Limit Hold'em by Bowling et al.\ (2015).
+
+\subsection{Monte Carlo CFR (MCCFR)}
+
+MCCFR (Lanctot et al., 2009) addresses the per-iteration cost. Instead of traversing the whole tree, you \textbf{sample}. In external sampling, you traverse all of your own actions but sample only one opponent action (and one chance outcome) at each node. This reduces the per-iteration cost from $O(|Z|)$ to something much smaller, at the cost of introducing variance.
+
+The convergence guarantee still holds---in expectation, MCCFR converges at the same $O(1/\sqrt{T})$ rate. But each iteration is much cheaper, so you can run many more iterations in the same time. For games like Leduc Hold'em ($\sim$936 information sets), MCCFR is usually the way to go.
+
+\section{Exploitability}
+
+How do you know if your strategy is any good? You compute the \textbf{exploitability}: for each player, compute the best response to the other player's strategy, and sum the best-response values. If the exploitability is zero, you're at a Nash equilibrium. In practice, you train until exploitability drops below some threshold.
+
+For small games like Kuhn Poker (12 information sets, 3 cards), you can verify the computed Nash equilibrium against the known analytic solution. Player~0 with a Jack should bluff with probability $\alpha \in [0, 1/3]$, Player~0 with a King should always bet, Player~1 with a King always calls, and the game value is $-1/18$ for Player~0. It's satisfying to watch the algorithm converge to these exact numbers.
+
+\section{Wrapping Up}
+
+CFR is one of those algorithms that looks complicated at first but is actually pretty elegant once you see the pieces. Regret matching gives you no-regret learning at each information set. Counterfactual values let you decompose the game into independent subproblems. And the averaging trick turns no-regret learning into equilibrium computation. The extensions (CFR+, MCCFR) are practical necessities for scaling up, but the core idea is unchanged: \textbf{play less of what you regret, and in the long run, you'll play optimally}.
+
+\begin{thebibliography}{9}
+\bibitem{zinkevich2007} M.\ Zinkevich, M.\ Johanson, M.\ Bowling, and C.\ Piccione, ``Regret Minimization in Games with Incomplete Information,'' \textit{NeurIPS}, 2007.
+
+\bibitem{bowling2015} M.\ Bowling, N.\ Burch, M.\ Johanson, and O.\ Tammelin, ``Heads-up Limit Hold'em Poker is Solved,'' \textit{Science}, 347(6218):145--149, 2015.
+
+\bibitem{brown2019} N.\ Brown and T.\ Sandholm, ``Superhuman AI for Multiplayer Poker,'' \textit{Science}, 365(6456):885--890, 2019.
+
+\bibitem{lanctot2009} M.\ Lanctot, K.\ Waugh, M.\ Zinkevich, and M.\ Bowling, ``Monte Carlo Sampling for Regret Minimization in Extensive Games,'' \textit{NeurIPS}, 2009.
+
+\bibitem{tammelin2014} O.\ Tammelin, ``Solving Large Imperfect Information Games Using CFR+,'' \textit{arXiv:1407.5042}, 2014.
+\end{thebibliography}
+
+\end{document}
